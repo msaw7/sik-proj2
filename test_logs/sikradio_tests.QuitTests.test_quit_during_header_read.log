@@ -1,0 +1,15 @@
+=== COMMAND ===
+./sikradio -u http://127.0.0.1:57247/ -t 10000
+=== RETURN CODE ===
+-9
+=== STDOUT ===
+
+=== STDERR ===
+2026.05.20 19.06.42
+resolving name 127.0.0.1
+connecting to server 127.0.0.1:57247
+GET / HTTP/1.1
+Host: 127.0.0.1:57247
+Connection: Keep-Alive
+
+

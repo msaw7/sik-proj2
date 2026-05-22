@@ -1,0 +1,23 @@
+=== COMMAND ===
+./sikradio -u http://127.0.0.1:41493/stream -m -t 2000
+=== RETURN CODE ===
+0
+=== STDOUT ===
+12345
+=== STDERR ===
+2026.05.20 19.06.57
+resolving name 127.0.0.1
+connecting to server 127.0.0.1:41493
+GET /stream HTTP/1.1
+Host: 127.0.0.1:41493
+Connection: Keep-Alive
+Icy-MetaData: 1
+
+
+HTTP/1.1 200 OK
+Content-Type: audio/mpeg
+icy-metaint: 5
+Connection: close
+
+
+StreamTitle='X';

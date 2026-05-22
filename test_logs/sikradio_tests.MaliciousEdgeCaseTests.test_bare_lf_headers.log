@@ -1,0 +1,16 @@
+=== COMMAND ===
+./sikradio -u http://127.0.0.1:45995/stream -t 2000
+=== RETURN CODE ===
+1
+=== STDOUT ===
+
+=== STDERR ===
+2026.05.20 19.06.56
+resolving name 127.0.0.1
+connecting to server 127.0.0.1:45995
+GET /stream HTTP/1.1
+Host: 127.0.0.1:45995
+Connection: Keep-Alive
+
+
+	ERROR: Failed to read entire header.
