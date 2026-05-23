@@ -182,9 +182,9 @@ string build_request(const string& path, const string& host, const string& port,
 
     req += "GET " + path + " HTTP/1.1\r\n";
     if(host.find(":") != string::npos) { // Host is a IPv6 literal.
-        req += "Host: [" + host + "]:" + port + "\r\n";
+        req += "Host: [" + host + "]\r\n";
     }
-    else req += "Host: " + host + ":" + port + "\r\n";
+    else req += "Host: " + host + "\r\n";
 
     req += "Connection: Keep-Alive\r\n";
     if(multiplex) req += "Icy-MetaData: 1\r\n";

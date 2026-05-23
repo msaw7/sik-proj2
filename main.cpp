@@ -18,7 +18,7 @@ using namespace std;
 #define VERBOSITY_MIN 0
 #define VERBOSITY_MAX 4
 
-static string url, original_url = "";
+static string url = "", original_url = "";
 static bool multiplex = false;
 static int timeout = TIMEOUT_DEFAULT;
 static bool force_ip4 = false;
@@ -198,7 +198,8 @@ static char std_buffer[STD_BUFF_LEN];
 static string recent_chars;
 
 /*
-
+Reads from stdin and looks for the termination phrase "quit\n".
+Returns true if it was found, false otherwise.
 */
 bool parse_std() {
     ssize_t received = read(STDIN_FILENO, std_buffer, sizeof(std_buffer));
@@ -207,7 +208,7 @@ bool parse_std() {
         fatal(verbosity, "Issues with stdin.");
     }
     else if(received == 0) {
-        noncritical(verbosity, "STDIN has closed.");
+        noncritical(verbosity, "stdin has closed.");
         return false;
     }
 
@@ -237,6 +238,11 @@ remaining audio bytes to be flushed to stdout.
 It is completely transparent to the user whether we first receive quit and
 flush the remaining bytes afterwards, or keep the audio stream flushed at all
 times and immediately exit upon receiving quit.
+
+Takes icy_metaint, the number of audio bytes in each ICY chunk.
+Takes and modifies L and position, being the size of the most recent metadata
+block, and the byte index we are considering in the current ICY chunk, 
+respectively.
 
 Returns true if the server gracefully ended connection, false otherwise.
 Calls fatal on abrupt end of connection and other critical errors.
@@ -276,17 +282,19 @@ bool parse_tcp(size_t icy_metaint, size_t &L, size_t &position) {
         }
         // Find out the size of metadata (L).
         else if(position == icy_metaint) {
-            L = ((unsigned int) tcp_buffer[buff_ptr]) * 16;
+            L = ((int) ((unsigned char) tcp_buffer[buff_ptr])) * 16;
             position ++;
             received --;
             buff_ptr ++;
         }
-        // We already know the value of L.
+        // We already know the value of L, so proceed with parsing.
         else {
+            size_t icy_chunk_size = (icy_metaint + 1 + L);
+
             // to_print is the number of bytes we are considering till end of
             // meta block.
             size_t to_print = min((size_t) received, 
-                (icy_metaint + 1 + L) - position);
+                (icy_chunk_size) - position);
 
             // We need to strip the null bytes from the end of metadata block.
             // They are not part of the message.
@@ -302,7 +310,7 @@ bool parse_tcp(size_t icy_metaint, size_t &L, size_t &position) {
                 to_print - no_nullbytes)); // Skips the null bytes.
             
             position += to_print;
-            if(position == icy_metaint + L + 1) { // Finished meta block.
+            if(position == icy_chunk_size) { // Finished meta block.
                 position = 0;
                 if(L != 0) {
                     char c = '\n';
@@ -323,9 +331,17 @@ enum StreamEndCode {
     CONNECTION_TIMEOUT,
 };
 
-// 0 when user ended
-// 1 when tcp closed
-// 2 when timeout
+/*
+Continuously polls stdin and TCP socket:
+- looks for quit phrase on stdin
+- forwards audio from the TCP socket to stdout
+- forwards metadata from the TCP socket to stderr (if icy_metaint > 0)
+
+Returns an adequate code if:
+- the termination phrase appeared in stdin (USER_ENDED)
+- the server ended connection gracefully (SERVER_DROPPED)
+- 'timeout' milliseconds passed without data from server (CONNECTION_TIMEOUT)
+*/
 int receive_stream(size_t icy_metaint) {
     const int std = 0, tcp = 1;
     pollfd fds[2];
@@ -356,7 +372,7 @@ int receive_stream(size_t icy_metaint) {
         remaining_time = remaining_time - elapsed;
 
         if(ret < 0) {
-            if(errno == EINTR) continue;
+            if(errno == EINTR) continue; // Guard against spurious wakeups.
             syserr(verbosity, "poll");
         }
         if(ret == 0) {
@@ -395,10 +411,24 @@ int main(int argc, char *argv[]) {
     init_ssl();
     multimap <string, string> fields;
     map <string, string> cookies;
+    /*
+    Begins a redirection/timeout loop.
+    If the program receives a redirection response, it keeps the cookies and
+    follows to the new location with a new URL.
+    If the program receives a status 200 OK response, it starts forwarding the
+    audio and metadata from server to user.
+    
+    Upon receiving a timeout, clears cookies and resets reverts URL to the one
+    that was passed in arguments.
+
+    If either the user or the server decide to end the connection, exits with 0.
+    */
     while(true) {
+        // Establish connection.
         parse_url();
         sock = connect_tcp(host, port, force_ip4, force_ip6, verbosity);
         start_ssl();
+        // Create and send request.
         string request = build_request(path, host, port, cookies, multiplex);
         size_t sent = 0;
         while(sent < request.length()) {
@@ -410,6 +440,7 @@ int main(int argc, char *argv[]) {
         if(verbosity >= COMMUNICATION) {
             cerr << request << endl;
         }
+        // Receive header.
         string header = read_header();
         if(verbosity >= COMMUNICATION) {
             cerr << header << endl;
@@ -428,7 +459,7 @@ int main(int argc, char *argv[]) {
 
             auto it = fields.find("location");
             if(it == fields.end()) {
-                fatal(verbosity, "Could not follow redirection.");
+                fatal(verbosity, "Failed to follow redirect chain.");
             }
 
             // We found a new address to reconnect to.
@@ -477,6 +508,7 @@ int main(int argc, char *argv[]) {
                     return 1;
             }
         }
+        // Invalid status code.
         else {
             fatal(verbosity, "Failed to follow redirect chain.");
         }

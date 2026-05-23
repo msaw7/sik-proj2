@@ -562,8 +562,8 @@ class TestURLParsing(SikradioTestBase):
             self.assertExitOk(rc)
             req = srv.last_request
             self.assertIn(b"GET /stream HTTP/1.1", req)
-            # Host header should have brackets for IPv6
-            self.assertIn(b"Host: [::1]:", req)
+            # Host header should have brackets for IPv6, no port
+            self.assertIn(b"Host: [::1]\r\n", req)
         finally:
             srv.stop()
 
@@ -642,12 +642,15 @@ class TestHTTPRequest(SikradioTestBase):
         # The request must end with \r\n\r\n
         self.assertIn(b"\r\n\r\n", req)
 
-    def test_host_header_includes_port(self):
-        """Host header should include the port (as shown in examples)."""
+    def test_host_header_excludes_port(self):
+        """Host header should contain only the hostname, without port.
+        Every example log shows Host without port, even for non-default ports:
+          URL http://stream.radiobaobab.pl:8000/... → Host: stream.radiobaobab.pl
+          URL http://stream3.polskieradio.pl:8900   → Host: stream3.polskieradio.pl"""
         req = self._capture_request()
-        # For a non-standard port, the Host header should contain host:port
-        self.assertRegex(req.decode("utf-8", errors="replace"),
-                         r"Host:\s*127\.0\.0\.1:\d+")
+        req_text = req.decode("utf-8", errors="replace")
+        # Must have Host: 127.0.0.1 without a port suffix
+        self.assertRegex(req_text, r"Host:\s*127\.0\.0\.1\r\n")
 
 
 # ===========================================================================
@@ -1754,7 +1757,8 @@ class TestEdgeCases(SikradioTestBase):
             srv.stop()
 
     def test_host_header_ipv6_brackets(self):
-        """When connecting to an IPv6 literal, Host header should use [addr]:port."""
+        """When connecting to an IPv6 literal, Host header should use [addr]
+        without port, per example logs."""
         captured = {}
 
         def handler(conn, addr, srv):
@@ -1771,7 +1775,7 @@ class TestEdgeCases(SikradioTestBase):
             url = f"http://[::1]:{srv.port}/test"
             run_sikradio(["-u", url, "-q"], timeout=5)
             req_text = captured["req"].decode("utf-8", errors="replace")
-            self.assertIn(f"Host: [::1]:{srv.port}", req_text)
+            self.assertIn("Host: [::1]\r\n", req_text)
         finally:
             srv.stop()
 
@@ -3632,8 +3636,6 @@ class TestDemuxStateMachineHell(SikradioTestBase):
             stdout, stderr, rc = run_sikradio(
                 ["-u", srv.url("/"), "-mq"], timeout=8)
             self.assertExitOk(rc)
-            assert len(big_meta_padded) == 4080
-            assert len(stream) == 4 * metaint + 2 * (1 + 4080) + 2 * 1  # = 8230
             self.assertEqual(stdout, expected_audio)
             self.assertIn(b"ZZZZ", stderr)
         finally:
@@ -3841,7 +3843,7 @@ class TestHeaderParsingNightmares(SikradioTestBase):
         finally:
             srv.stop()
 
-    # Not valid acc to RFC.
+    # IMPLEMENTATION SPECIFIC
 
     # def test_status_line_with_extra_spaces(self):
     #     """'HTTP/1.1  200  OK' — multiple spaces between fields."""
@@ -4262,8 +4264,8 @@ class TestURLParsingHell(SikradioTestBase):
         finally:
             srv.stop()
 
-    def test_url_with_port_443_http(self):
-        """http://host:443/ — unusual but valid. Port must appear in Host header."""
+    def test_url_with_port_host_header(self):
+        """Host header must contain only the hostname, no port."""
         captured = {}
 
         def handler(conn, addr, srv):
@@ -4279,9 +4281,9 @@ class TestURLParsingHell(SikradioTestBase):
         try:
             url = f"http://127.0.0.1:{srv.port}/stream"
             run_sikradio(["-u", url, "-q"], timeout=5)
-            # Host header must include the actual port
+            # Host header must NOT include the port
             req_text = captured["req"].decode("utf-8", errors="replace")
-            self.assertIn(f"Host: 127.0.0.1:{srv.port}", req_text)
+            self.assertIn("Host: 127.0.0.1\r\n", req_text)
         finally:
             srv.stop()
 
@@ -4519,10 +4521,9 @@ class TestRedirectEdgeCases(SikradioTestBase):
                 ["-u", srv1.url("/stream"), "-q"], timeout=5)
             self.assertExitOk(rc)
             self.assertEqual(stdout, audio)
-            # Host header must reference srv2's port, not srv1's
+            # Host header must be just the hostname, no port
             req2_text = captured["req2"].decode("utf-8", errors="replace")
-            self.assertIn(f"Host: 127.0.0.1:{srv2.port}", req2_text)
-            self.assertNotIn(f":{srv1.port}", req2_text)
+            self.assertIn("Host: 127.0.0.1\r\n", req2_text)
         finally:
             srv1.stop()
             srv2.stop()
