@@ -1,0 +1,39 @@
+$ ./sikradio -u http://stream.rcs.revma.com/ypqt40u0x1zuv -6m | play -q -t mp3 -
+2025.11.09 18.17.48
+resolving name stream.rcs.revma.com
+connecting to server [2001:41d0:203:8b98::]:80
+GET /ypqt40u0x1zuv HTTP/1.1
+Host: stream.rcs.revma.com
+Connection: Keep-Alive
+Icy-MetaData: 1
+
+
+HTTP/1.0 302 Found
+Location: http://n44a-eu.rcs.revma.com/ypqt40u0x1zuv?rj-ttl=5&rj-tok=AAABmmmo6d4Aye2aM7Z8HR9voA
+Content-Length: 0
+Connection: close
+Set-Cookie: rj-listener-cookie=1qbs1mbwajfp5; Domain=revma.com
+
+
+2025.11.09 18.17.48
+resolving name n44a-eu.rcs.revma.com
+connecting to server [2001:41d0:203:d358::]:80
+GET /ypqt40u0x1zuv?rj-ttl=5&rj-tok=AAABmmmo6d4Aye2aM7Z8HR9voA HTTP/1.1
+Host: n44a-eu.rcs.revma.com
+Connection: Keep-Alive
+Cookie: rj-listener-cookie=1qbs1mbwajfp5
+Icy-MetaData: 1
+
+
+HTTP/1.1 200 OK
+content-type: audio/mpeg
+icy-name: Radio Nowy Swiat
+icy-url: https://nowyswiat.online
+icy-genre: Alternative
+icy-description: Pion i poziom
+icy-metaint: 16000
+
+
+StreamTitle='Kosma Król & Kuba Więcek - syf na sell';
+StreamTitle='Radio Nowy Świat - Pion i poziom!';
+StreamTitle='Demae - Don't Play The Fool';

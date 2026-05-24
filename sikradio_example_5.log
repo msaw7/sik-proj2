@@ -1,0 +1,70 @@
+$ ./sikradio -u https://stream.nowyswiat.online/mp3 -m -t 3500 | play -q -t mp3 -
+2025.11.09 16.44.31
+resolving name stream.nowyswiat.online
+connecting to server 104.21.10.201:443
+GET /mp3 HTTP/1.1
+Host: stream.nowyswiat.online
+Connection: Keep-Alive
+Icy-MetaData: 1
+
+
+HTTP/1.1 302 Found
+Date: Sun, 09 Nov 2025 15:44:31 GMT
+Content-Type: text/html; charset=iso-8859-1
+Transfer-Encoding: chunked
+Connection: keep-alive
+Server: cloudflare
+location: https://stream.rcs.revma.com/ypqt40u0x1zuv
+cf-cache-status: DYNAMIC
+Nel: {"report_to":"cf-nel","success_fraction":0.0,"max_age":604800}
+Report-To: {"group":"cf-nel","max_age":604800,"endpoints":[{"url":"https://a.nel.cloudflare.com/report/v4?s=4YuSbJLsU8CF%2Fk2jE2lQ8UKpzNTDWJmCh6Gxk6KX6Nn4%2BrbgA64M%2FRiEkQHzE7uF4F%2FLOo6QSX0xq%2FPALXuNQpESIVcFxdPJR16BvFABP2oSsVFCDMNe"}]}
+CF-RAY: 99be6e93c9158174-WAW
+alt-svc: h3=":443"; ma=86400
+
+
+2025.11.09 16.44.31
+resolving name stream.rcs.revma.com
+connecting to server 51.210.3.128:443
+GET /ypqt40u0x1zuv HTTP/1.1
+Host: stream.rcs.revma.com
+Connection: Keep-Alive
+Icy-MetaData: 1
+
+
+HTTP/1.0 302 Found
+Location: https://n23a-eu.rcs.revma.com/ypqt40u0x1zuv?rj-ttl=5&rj-tok=AAABmmlTgRYAxCTE_ytdnUkENA
+Content-Length: 0
+Connection: close
+Set-Cookie: rj-listener-cookie=ifoh5jglnr6w; Domain=revma.com
+
+
+2025.11.09 16.44.31
+resolving name n23a-eu.rcs.revma.com
+connecting to server 141.94.240.147:443
+GET /ypqt40u0x1zuv?rj-ttl=5&rj-tok=AAABmmlTgRYAxCTE_ytdnUkENA HTTP/1.1
+Host: n23a-eu.rcs.revma.com
+Connection: Keep-Alive
+Cookie: rj-listener-cookie=ifoh5jglnr6w
+Icy-MetaData: 1
+
+
+HTTP/1.1 200 OK
+content-type: audio/mpeg
+icy-name: Radio Nowy Swiat
+icy-url: https://nowyswiat.online
+icy-genre: Alternative
+icy-description: Pion i poziom
+icy-metaint: 16000
+
+
+StreamTitle='Louis Armstrong - La Vie En Rose';
+StreamTitle='Radio Nowy Świat - Pion i poziom!';
+StreamTitle='Édith Piaf - Paris';
+StreamTitle='Radio Nowy Świat - Pion i poziom!';
+StreamTitle='Sidney Bechet - Si tu vois ma mère (From "Midnight In Paris")';
+StreamTitle='Radio Nowy Świat - Pion i poziom!';
+StreamTitle='Julie London - Lonely Night in Paris';
+StreamTitle='Radio Nowy Świat - Pion i poziom!';
+StreamTitle='Charlie Parker - April In Paris';
+StreamTitle='Radio Nowy Świat - Pion i poziom!';
+StreamTitle='Lizz Wright - Stop';

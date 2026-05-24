@@ -1,0 +1,25 @@
+$ ./sikradio -u http://stream.radiobaobab.pl:8000/radiobaobab.mp3 | play -q -t mp3 -
+2026.04.14 21.58.20
+resolving name stream.radiobaobab.pl
+connecting to server 94.23.88.220:8000
+GET /radiobaobab.mp3 HTTP/1.1
+Host: stream.radiobaobab.pl
+Connection: Keep-Alive
+
+
+HTTP/1.0 200 OK
+Server: Icecast 2.4.4
+Connection: Close
+Date: Tue, 14 Apr 2026 19:58:20 GMT
+Content-Type: audio/mpeg
+Cache-Control: no-cache, no-store
+Expires: Mon, 26 Jul 1997 05:00:00 GMT
+Pragma: no-cache
+Access-Control-Allow-Origin: *
+icy-br:128
+ice-audio-info: channels=2;samplerate=44100;bitrate=128
+icy-description:Radio Baobab - Blues radiostation from Poland
+icy-genre:Blues
+icy-name:radiobaobab.mp3
+icy-pub:1
+icy-url:https://stream.radiobaobab.pl/radiobaobab.mp3
