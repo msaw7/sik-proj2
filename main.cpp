@@ -228,6 +228,84 @@ bool parse_std() {
 
 #define TCP_BUFF_LEN 65536
 static char tcp_buffer[TCP_BUFF_LEN];
+static char chunk_buffer[TCP_BUFF_LEN];
+
+enum ChunkState {
+    CH_SIZE, 
+    CH_DATA,
+    CH_DATA_CRLF
+};
+
+static int chunk_state = CH_SIZE;
+static size_t chunk_remaining = 0; 
+static string size_line;
+static bool chunk_stream_done = false;
+
+size_t dechunkify(bool encoding_chunked, bool &server_dropped) {
+    ssize_t received = net_recv(chunk_buffer, sizeof(chunk_buffer));
+
+    if(received < 0) {
+        fatal(verbosity, "Failed to read stream from server.");
+    }
+    else if(received == 0) {
+        server_dropped = true;
+        return 0;
+    }
+
+    if(!encoding_chunked) {
+        memcpy(tcp_buffer, chunk_buffer, received);
+        return (size_t) received;
+    }
+
+    size_t pos_chunk = 0;
+    size_t pos_tcp   = 0;
+
+    while(pos_chunk < (size_t) received) {
+        if(chunk_state == CH_SIZE) {
+            // Accumulate the size line one byte at a time until '\n'.
+            char c = chunk_buffer[pos_chunk];
+            pos_chunk ++;
+            if(c == '\n') {
+                errno = 0;
+                char *end;
+                unsigned long long sz =
+                    strtoull(size_line.c_str(), &end, 16);
+                if(end == size_line.c_str() || errno == ERANGE) {
+                    fatal(verbosity, "Malformed chunk size.");
+                }
+                size_line.clear();
+                chunk_remaining = (size_t) sz;
+                chunk_state = CH_DATA;
+            }
+            else {
+                size_line += c;
+            }
+        }
+        else if(chunk_state == CH_DATA) {
+            // Copy by COUNT, never by scanning — chunk data is binary and
+            // may itself contain '\r' or '\n'.
+            size_t avail = (size_t) received - pos_chunk;
+            size_t take  = min(avail, chunk_remaining);
+            memcpy(&tcp_buffer[pos_tcp], &chunk_buffer[pos_chunk], take);
+            pos_tcp += take;
+            pos_chunk += take;
+            chunk_remaining -= take;
+            if(chunk_remaining == 0) {
+                chunk_state = CH_DATA_CRLF;
+            }
+        }
+        else { // CH_DATA_CRLF - consume the "\r\n" that follows chunk data.
+            char c = chunk_buffer[pos_chunk];
+            pos_chunk ++;
+            if(c == '\n') {
+                chunk_state = CH_SIZE;   // ready for the next size line
+            }
+            // a '\r' (or anything before '\n') is simply skipped
+        }
+    }
+
+    return pos_tcp;
+}
 
 /*
 Attempts to read from the TCP socket, passing audio stream to stdin and metadata
@@ -244,18 +322,19 @@ Takes and modifies L and position, being the size of the most recent metadata
 block, and the byte index we are considering in the current ICY chunk, 
 respectively.
 
+If icy_metaint is set to 0, sends all bytes to stdin without multiplexing.
+
 Returns true if the server gracefully ended connection, false otherwise.
 Calls fatal on abrupt end of connection and other critical errors.
 */
-bool parse_tcp(size_t icy_metaint, size_t &L, size_t &position) {
-    ssize_t received = net_recv(tcp_buffer, sizeof(tcp_buffer));
 
-    if(received < 0) {
-        fatal(verbosity, "Failed to read stream from server.");
-    }
-    else if(received == 0) {
-        return true;
-    }
+bool parse_tcp(size_t icy_metaint, size_t &L, size_t &position, 
+    bool encoding_chunked) {
+
+    bool server_dropped = false;
+    size_t received = dechunkify(encoding_chunked, server_dropped);
+
+    if(server_dropped) return true;
     
     if(icy_metaint == 0) { // No multiplex.
         size_t to_write = received;
@@ -342,7 +421,7 @@ Returns an adequate code if:
 - the server ended connection gracefully (SERVER_DROPPED)
 - 'timeout' milliseconds passed without data from server (CONNECTION_TIMEOUT)
 */
-int receive_stream(size_t icy_metaint) {
+int receive_stream(size_t icy_metaint, bool encoding_chunked) {
     const int std = 0, tcp = 1;
     pollfd fds[2];
     // fds[0] is listening on stdin.
@@ -394,7 +473,7 @@ int receive_stream(size_t icy_metaint) {
         }
 
         if(fds[tcp].revents & (POLLIN | POLLERR | POLLHUP)) {
-            if(parse_tcp(icy_metaint, L, position)) {
+            if(parse_tcp(icy_metaint, L, position, encoding_chunked)) {
                 return SERVER_DROPPED;
             }
             // Refresh timeout on succesful receive.
@@ -429,7 +508,7 @@ int main(int argc, char *argv[]) {
         sock = connect_tcp(host, port, force_ip4, force_ip6, verbosity);
         start_ssl();
         // Create and send request.
-        string request = build_request(path, host, port, cookies, multiplex);
+        string request = build_request(path, host, cookies, multiplex);
         size_t sent = 0;
         while(sent < request.length()) {
             ssize_t n = net_send(request.c_str() + sent,
@@ -465,6 +544,10 @@ int main(int argc, char *argv[]) {
             // We found a new address to reconnect to.
             // End the current TCP session (but keep cookies) and start over.
             url = it->second;
+            if(url.empty()) {
+                fatal(verbosity, "Failed to follow redirect chain.");
+            }
+            url = consider_relative_path(url, protocol, host, port, path);
             end_ssl();
             if(close(sock) != 0) {
                 noncritical(verbosity, "Close had issues.");
@@ -473,17 +556,29 @@ int main(int argc, char *argv[]) {
         }
         // Begin the audio stream.
         else if(status == STATUS_OK) {
+
+            // Find out if the audio stream is chunked.
+            bool chunked = false;
+            auto it = fields.find("transfer-encoding");
+            if(it != fields.end()) {
+                if(it->second == "chunked") chunked = true;
+            }
+
             int code;
-            if(!multiplex) code = receive_stream(0);
+            if(!multiplex) code = receive_stream(0, chunked);
             else {
+                // Find out if server provides metadata.
                 auto it = fields.find("icy-metaint");
                 if(it == fields.end()) {
                     noncritical(verbosity, "Server does not provide metadata.");
-                    code = receive_stream(0);
+                    code = receive_stream(0, chunked);
                 }
                 else {
                     size_t icy_metaint = atoi(it->second.c_str());
-                    code = receive_stream(icy_metaint);
+                    if(icy_metaint == 0) {
+                        fatal(verbosity, "Invalid icy-metaint value.");
+                    }
+                    code = receive_stream(icy_metaint, chunked);
                 }
             }
             end_ssl();
@@ -495,6 +590,10 @@ int main(int argc, char *argv[]) {
                     return 0;
                     break;
                 case SERVER_DROPPED:
+                    if(verbosity >= DIAGNOSTIC) {
+                        cerr << "Server closed connection. Ending program." 
+                        << endl;
+                    }
                     return 0;
                     break;
                 case CONNECTION_TIMEOUT:

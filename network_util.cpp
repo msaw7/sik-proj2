@@ -176,7 +176,7 @@ int connect_tcp(const string &host, const string &port, bool force_ip4,
     return sock;
 }
 
-string build_request(const string& path, const string& host, const string& port,
+string build_request(const string& path, const string& host,
     const map <string, string>& cookies, bool multiplex) {
     string req;
 
@@ -289,3 +289,33 @@ void update_cookies(multimap <string, string> &fields,
     return;
 }
 
+/*
+Takes a new url given by a redirection and the old url split into its 
+fields (protocol, host, port, path).
+Returns the new url correctly combined with the old values.
+*/
+string consider_relative_path(const string &new_url, string &protocol,
+    string &host, string &port, string &path) {
+        if(new_url.find("://") == string::npos) {
+            string base = protocol + "://";
+            if(host.find(":") != string::npos) { // IPv6 literal
+                base += "[" + host + "]";  
+            } 
+            else {
+                base += host;
+            }
+            base += ":" + port;
+
+            if(new_url[0] != '/') { // Relative to current directory
+                size_t last_slash = path.rfind('/');
+                if(last_slash != string::npos) {
+                    base += path.substr(0, last_slash + 1);
+                } 
+                else {
+                    base += "/";
+                }
+            }
+            return base + new_url;
+        }
+        else return new_url;
+}

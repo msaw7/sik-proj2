@@ -236,6 +236,25 @@ def build_icy_stream(audio_chunks, metaint, metadata_strings=None):
     return stream
 
 
+def chunk_encode(data, chunk_size=4096, final_crlf=True):
+    """Encode a byte string using HTTP Transfer-Encoding: chunked.
+
+    Each chunk is: <hex size>\\r\\n<data>\\r\\n
+    Terminated by: 0\\r\\n\\r\\n
+    """
+    out = b""
+    offset = 0
+    while offset < len(data):
+        piece = data[offset:offset + chunk_size]
+        out += f"{len(piece):x}\r\n".encode() + piece + b"\r\n"
+        offset += len(piece)
+    # Terminating zero-length chunk
+    out += b"0\r\n"
+    if final_crlf:
+        out += b"\r\n"
+    return out
+
+
 def generate_self_signed_cert(tmpdir):
     """Generate a self-signed cert+key in tmpdir, return (certfile, keyfile)."""
     certfile = os.path.join(tmpdir, "cert.pem")
@@ -4527,6 +4546,581 @@ class TestRedirectEdgeCases(SikradioTestBase):
         finally:
             srv1.stop()
             srv2.stop()
+
+
+# ===========================================================================
+# 31. Transfer-Encoding: chunked
+# ===========================================================================
+
+class TestChunkedTransferEncoding(SikradioTestBase):
+    """Tests for HTTP/1.1 Transfer-Encoding: chunked.
+
+    Spec note: the client does not interpret audio *content*, but chunked
+    encoding is HTTP transport-layer framing, not content. A server that
+    advertises 'Transfer-Encoding: chunked' frames the body as
+    <hexsize>\\r\\n<data>\\r\\n ... 0\\r\\n\\r\\n. If the client writes those
+    framing bytes to stdout verbatim, the audio is corrupted.
+
+    Example 5 (sikradio_example_5.log) shows a real server sending
+    'Transfer-Encoding: chunked' on a 302 redirect response — so a correct
+    client must at minimum tolerate chunked framing on redirect responses.
+    Whether it must de-chunk an actual 200 audio stream is not explicitly
+    stated; these tests document both scenarios.
+    """
+
+    def test_chunked_redirect_body_ignored(self):
+        """302 redirect with a chunked-encoded HTML body (as in example 5).
+        The client must follow the Location header and ignore the chunked
+        body entirely. This is the scenario the examples actually exercise."""
+        audio = b"\xCC" * 200
+        redirect_body = b"<html>Moved</html>"
+
+        def handler(conn, addr, srv):
+            req = recv_until(conn)
+            if b"GET /start" in req:
+                resp = b"HTTP/1.1 302 Found\r\n"
+                resp += f"Location: http://127.0.0.1:{srv.port}/final\r\n".encode()
+                resp += b"Transfer-Encoding: chunked\r\n"
+                resp += b"Connection: keep-alive\r\n"
+                resp += b"\r\n"
+                resp += chunk_encode(redirect_body, chunk_size=8)
+                conn.sendall(resp)
+            else:
+                conn.sendall(build_http_response(
+                    "HTTP/1.1 200 OK",
+                    {"content-type": "audio/mpeg"}, audio))
+            conn.shutdown(socket.SHUT_WR)
+
+        srv = MockServer(handler)
+        srv.start()
+        try:
+            stdout, _, rc = run_sikradio(
+                ["-u", srv.url("/start"), "-q"], timeout=5)
+            self.assertExitOk(rc)
+            self.assertEqual(stdout, audio)
+            # The chunked redirect body must not leak into stdout
+            self.assertNotIn(redirect_body, stdout)
+            self.assertNotIn(b"<html>", stdout)
+        finally:
+            srv.stop()
+
+    def test_chunked_audio_stream_dechunked(self):
+        """Server delivers the 200 audio stream itself with
+        Transfer-Encoding: chunked. A correct client must de-chunk it so
+        stdout receives only the audio payload, not the hex size lines.
+
+        If your implementation does not support chunked audio bodies, this
+        test documents the failure; real Icecast/SHOUTcast servers stream
+        raw, so this is an edge case rather than a hard requirement."""
+        audio = bytes(random.Random(7).getrandbits(8) for _ in range(8192))
+
+        def handler(conn, addr, srv):
+            recv_until(conn)
+            resp = b"HTTP/1.1 200 OK\r\n"
+            resp += b"Content-Type: audio/mpeg\r\n"
+            resp += b"Transfer-Encoding: chunked\r\n"
+            resp += b"\r\n"
+            resp += chunk_encode(audio, chunk_size=1000)
+            conn.sendall(resp)
+            conn.shutdown(socket.SHUT_WR)
+
+        srv = MockServer(handler)
+        srv.start()
+        try:
+            stdout, _, rc = run_sikradio(
+                ["-u", srv.url("/"), "-q"], timeout=8)
+            self.assertExitOk(rc)
+            # stdout must be exactly the audio — no chunk framing bytes
+            self.assertEqual(stdout, audio,
+                             "Chunked audio stream was not de-chunked: "
+                             "chunk size lines / CRLFs leaked into stdout")
+        finally:
+            srv.stop()
+
+    def test_chunked_audio_no_size_lines_in_output(self):
+        """Verify no hexadecimal chunk-size lines appear in stdout. Uses an
+        audio payload of pure 0xAA so any leaked ASCII hex digits / CRLF
+        from chunk framing are easy to detect."""
+        audio = b"\xAA" * 6000
+
+        def handler(conn, addr, srv):
+            recv_until(conn)
+            resp = b"HTTP/1.1 200 OK\r\n"
+            resp += b"Content-Type: audio/mpeg\r\n"
+            resp += b"Transfer-Encoding: chunked\r\n"
+            resp += b"\r\n"
+            resp += chunk_encode(audio, chunk_size=512)
+            conn.sendall(resp)
+            conn.shutdown(socket.SHUT_WR)
+
+        srv = MockServer(handler)
+        srv.start()
+        try:
+            stdout, _, rc = run_sikradio(
+                ["-u", srv.url("/"), "-q"], timeout=8)
+            self.assertExitOk(rc)
+            # 0xAA never equals an ASCII hex digit or CR/LF, so a correct
+            # de-chunked stream is pure 0xAA bytes.
+            self.assertEqual(stdout, audio)
+            self.assertNotIn(b"\r\n", stdout)
+            self.assertNotIn(b"200\r\n", stdout)
+        finally:
+            srv.stop()
+
+    def test_chunked_audio_single_chunk(self):
+        """Entire audio body in one chunk followed by the 0-terminator."""
+        audio = b"\xBB" * 1024
+
+        def handler(conn, addr, srv):
+            recv_until(conn)
+            resp = b"HTTP/1.1 200 OK\r\n"
+            resp += b"Content-Type: audio/mpeg\r\n"
+            resp += b"Transfer-Encoding: chunked\r\n"
+            resp += b"\r\n"
+            resp += chunk_encode(audio, chunk_size=len(audio))
+            conn.sendall(resp)
+            conn.shutdown(socket.SHUT_WR)
+
+        srv = MockServer(handler)
+        srv.start()
+        try:
+            stdout, _, rc = run_sikradio(
+                ["-u", srv.url("/"), "-q"], timeout=5)
+            self.assertExitOk(rc)
+            self.assertEqual(stdout, audio)
+        finally:
+            srv.stop()
+
+    def test_chunked_audio_many_tiny_chunks(self):
+        """Audio split into many 1-byte chunks. Stresses the de-chunker's
+        state machine across chunk boundaries."""
+        audio = bytes(range(256))  # 256 distinct bytes
+
+        def handler(conn, addr, srv):
+            recv_until(conn)
+            resp = b"HTTP/1.1 200 OK\r\n"
+            resp += b"Content-Type: audio/mpeg\r\n"
+            resp += b"Transfer-Encoding: chunked\r\n"
+            resp += b"\r\n"
+            resp += chunk_encode(audio, chunk_size=1)
+            conn.sendall(resp)
+            conn.shutdown(socket.SHUT_WR)
+
+        srv = MockServer(handler)
+        srv.start()
+        try:
+            stdout, _, rc = run_sikradio(
+                ["-u", srv.url("/"), "-q"], timeout=8)
+            self.assertExitOk(rc)
+            self.assertEqual(stdout, audio)
+        finally:
+            srv.stop()
+
+    def test_chunked_audio_split_across_tcp_segments(self):
+        """Chunk-encoded audio sent in tiny TCP segments, so chunk size lines
+        and chunk data are split across recv() boundaries."""
+        audio = bytes(random.Random(11).getrandbits(8) for _ in range(4096))
+        encoded = chunk_encode(audio, chunk_size=333)
+
+        def handler(conn, addr, srv):
+            recv_until(conn)
+            header = b"HTTP/1.1 200 OK\r\n"
+            header += b"Content-Type: audio/mpeg\r\n"
+            header += b"Transfer-Encoding: chunked\r\n"
+            header += b"\r\n"
+            conn.sendall(header)
+            # Drip the chunked body in 7-byte TCP segments
+            for i in range(0, len(encoded), 7):
+                try:
+                    conn.sendall(encoded[i:i + 7])
+                except (BrokenPipeError, OSError):
+                    return
+                time.sleep(0.001)
+            conn.shutdown(socket.SHUT_WR)
+
+        srv = MockServer(handler)
+        srv.start()
+        try:
+            stdout, _, rc = run_sikradio(
+                ["-u", srv.url("/"), "-q"], timeout=12)
+            self.assertExitOk(rc)
+            self.assertEqual(stdout, audio)
+        finally:
+            srv.stop()
+
+    def test_chunked_audio_with_icy_metadata(self):
+        """The hardest combination: chunked transport framing wrapping an
+        ICY-metadata-interleaved audio stream. The client must first
+        de-chunk, then demux the ICY metadata from the result."""
+        metaint = 64
+        audio = b"\xDD" * metaint
+        meta = "StreamTitle='Chunked+ICY';"
+        icy_stream = build_icy_stream([audio, audio], metaint, [meta, None])
+        encoded = chunk_encode(icy_stream, chunk_size=100)
+
+        def handler(conn, addr, srv):
+            recv_until(conn)
+            resp = b"HTTP/1.1 200 OK\r\n"
+            resp += b"Content-Type: audio/mpeg\r\n"
+            resp += f"icy-metaint: {metaint}\r\n".encode()
+            resp += b"Transfer-Encoding: chunked\r\n"
+            resp += b"\r\n"
+            resp += encoded
+            conn.sendall(resp)
+            conn.shutdown(socket.SHUT_WR)
+
+        srv = MockServer(handler)
+        srv.start()
+        try:
+            stdout, stderr, rc = run_sikradio(
+                ["-u", srv.url("/"), "-mq"], timeout=8)
+            self.assertExitOk(rc)
+            self.assertEqual(stdout, audio * 2)
+            self.assertIn(b"StreamTitle='Chunked+ICY';", stderr)
+        finally:
+            srv.stop()
+
+    def test_chunked_size_uppercase_hex(self):
+        """Chunk sizes written with uppercase hex digits (e.g. 'FF' not 'ff').
+        RFC 7230 allows both — the de-chunker must accept uppercase."""
+        audio = b"\xEE" * 300
+
+        def handler(conn, addr, srv):
+            recv_until(conn)
+            resp = b"HTTP/1.1 200 OK\r\n"
+            resp += b"Content-Type: audio/mpeg\r\n"
+            resp += b"Transfer-Encoding: chunked\r\n"
+            resp += b"\r\n"
+            # Manually encode with uppercase hex
+            offset = 0
+            while offset < len(audio):
+                piece = audio[offset:offset + 256]
+                resp += f"{len(piece):X}\r\n".encode() + piece + b"\r\n"
+                offset += len(piece)
+            resp += b"0\r\n\r\n"
+            conn.sendall(resp)
+            conn.shutdown(socket.SHUT_WR)
+
+        srv = MockServer(handler)
+        srv.start()
+        try:
+            stdout, _, rc = run_sikradio(
+                ["-u", srv.url("/"), "-q"], timeout=5)
+            self.assertExitOk(rc)
+            self.assertEqual(stdout, audio)
+        finally:
+            srv.stop()
+
+    def test_chunked_with_chunk_extension(self):
+        """Chunk size line carries a chunk-extension (';name=value' after the
+        size). RFC 7230 permits this; the de-chunker must skip the extension
+        and read only the size."""
+        audio = b"\x55" * 400
+
+        def handler(conn, addr, srv):
+            recv_until(conn)
+            resp = b"HTTP/1.1 200 OK\r\n"
+            resp += b"Content-Type: audio/mpeg\r\n"
+            resp += b"Transfer-Encoding: chunked\r\n"
+            resp += b"\r\n"
+            offset = 0
+            while offset < len(audio):
+                piece = audio[offset:offset + 200]
+                # size with a bogus chunk-extension
+                resp += f"{len(piece):x};foo=bar\r\n".encode() + piece + b"\r\n"
+                offset += len(piece)
+            resp += b"0\r\n\r\n"
+            conn.sendall(resp)
+            conn.shutdown(socket.SHUT_WR)
+
+        srv = MockServer(handler)
+        srv.start()
+        try:
+            stdout, _, rc = run_sikradio(
+                ["-u", srv.url("/"), "-q"], timeout=5)
+            self.assertExitOk(rc)
+            self.assertEqual(stdout, audio)
+        finally:
+            srv.stop()
+
+
+# ===========================================================================
+# 32. Relative redirect URLs
+# ===========================================================================
+
+class TestRelativeRedirects(SikradioTestBase):
+    """The Location header on a redirect may be a relative URL rather than an
+    absolute one. RFC 7231 §7.1.2 allows relative references. A correct client
+    resolves the relative Location against the URL of the request that
+    produced the redirect."""
+
+    def test_redirect_absolute_path(self):
+        """Location: /newpath — absolute path, no scheme/host. Must resolve
+        to the same host:port with the new path."""
+        audio = b"\xAA" * 100
+
+        def handler(conn, addr, srv):
+            req = recv_until(conn)
+            if b"GET /old" in req:
+                conn.sendall(build_http_response(
+                    "HTTP/1.1 302 Found",
+                    {"Location": "/newpath", "Connection": "close"}, b""))
+            elif b"GET /newpath" in req:
+                conn.sendall(build_http_response(
+                    "HTTP/1.1 200 OK",
+                    {"content-type": "audio/mpeg"}, audio))
+            else:
+                conn.sendall(build_http_response(
+                    "HTTP/1.1 404 Not Found", {}, b""))
+            conn.shutdown(socket.SHUT_WR)
+
+        srv = MockServer(handler)
+        srv.start()
+        try:
+            stdout, _, rc = run_sikradio(
+                ["-u", srv.url("/old"), "-q"], timeout=5)
+            self.assertExitOk(rc)
+            self.assertEqual(stdout, audio)
+        finally:
+            srv.stop()
+
+    def test_redirect_absolute_path_with_query(self):
+        """Location: /stream?token=abc — absolute path including a query."""
+        audio = b"\xBB" * 100
+        captured = {}
+
+        def handler(conn, addr, srv):
+            req = recv_until(conn)
+            if b"GET /old" in req:
+                conn.sendall(build_http_response(
+                    "HTTP/1.1 302 Found",
+                    {"Location": "/stream?token=abc&x=1",
+                     "Connection": "close"}, b""))
+            else:
+                captured["req2"] = req
+                conn.sendall(build_http_response(
+                    "HTTP/1.1 200 OK",
+                    {"content-type": "audio/mpeg"}, audio))
+            conn.shutdown(socket.SHUT_WR)
+
+        srv = MockServer(handler)
+        srv.start()
+        try:
+            stdout, _, rc = run_sikradio(
+                ["-u", srv.url("/old"), "-q"], timeout=5)
+            self.assertExitOk(rc)
+            self.assertEqual(stdout, audio)
+            self.assertIn(b"GET /stream?token=abc&x=1 HTTP/1.1",
+                          captured["req2"])
+        finally:
+            srv.stop()
+
+    def test_redirect_absolute_path_preserves_host(self):
+        """A relative redirect must keep the SAME host:port. Verify the Host
+        header on the second request is unchanged."""
+        audio = b"\xCC" * 80
+        captured = {}
+
+        def handler(conn, addr, srv):
+            req = recv_until(conn)
+            if b"GET /a" in req:
+                conn.sendall(build_http_response(
+                    "HTTP/1.1 302 Found",
+                    {"Location": "/b", "Connection": "close"}, b""))
+            else:
+                captured["req2"] = req
+                conn.sendall(build_http_response(
+                    "HTTP/1.1 200 OK",
+                    {"content-type": "audio/mpeg"}, audio))
+            conn.shutdown(socket.SHUT_WR)
+
+        srv = MockServer(handler)
+        srv.start()
+        try:
+            stdout, _, rc = run_sikradio(
+                ["-u", srv.url("/a"), "-q"], timeout=5)
+            self.assertExitOk(rc)
+            self.assertEqual(stdout, audio)
+            # Host on the second request must still be 127.0.0.1 (no port)
+            req2_text = captured["req2"].decode("utf-8", errors="replace")
+            self.assertIn("Host: 127.0.0.1\r\n", req2_text)
+        finally:
+            srv.stop()
+
+    def test_redirect_absolute_path_keeps_port(self):
+        """When the original URL used a non-default port, a relative redirect
+        must connect back to that same port."""
+        audio = b"\xDD" * 80
+        conn_count = {"n": 0}
+
+        def handler(conn, addr, srv):
+            req = recv_until(conn)
+            conn_count["n"] += 1
+            if b"GET /first" in req:
+                conn.sendall(build_http_response(
+                    "HTTP/1.1 302 Found",
+                    {"Location": "/second", "Connection": "close"}, b""))
+            else:
+                conn.sendall(build_http_response(
+                    "HTTP/1.1 200 OK",
+                    {"content-type": "audio/mpeg"}, audio))
+            conn.shutdown(socket.SHUT_WR)
+
+        srv = MockServer(handler)
+        srv.start()
+        try:
+            stdout, _, rc = run_sikradio(
+                ["-u", srv.url("/first"), "-q"], timeout=5)
+            self.assertExitOk(rc)
+            self.assertEqual(stdout, audio)
+            # Both requests landed on the same mock server (same port)
+            self.assertGreaterEqual(conn_count["n"], 2)
+        finally:
+            srv.stop()
+
+    def test_redirect_relative_then_absolute_chain(self):
+        """A chain mixing a relative redirect and an absolute redirect:
+        /start --(relative)--> /mid --(absolute)--> other server."""
+        audio = b"\xEE" * 90
+
+        def handler2(conn, addr, srv):
+            recv_until(conn)
+            conn.sendall(build_http_response(
+                "HTTP/1.1 200 OK",
+                {"content-type": "audio/mpeg"}, audio))
+            conn.shutdown(socket.SHUT_WR)
+
+        srv2 = MockServer(handler2)
+        srv2.start()
+
+        def handler1(conn, addr, srv):
+            req = recv_until(conn)
+            if b"GET /start" in req:
+                # relative redirect
+                conn.sendall(build_http_response(
+                    "HTTP/1.1 302 Found",
+                    {"Location": "/mid", "Connection": "close"}, b""))
+            elif b"GET /mid" in req:
+                # absolute redirect to the other server
+                conn.sendall(build_http_response(
+                    "HTTP/1.1 302 Found",
+                    {"Location": srv2.url("/final"),
+                     "Connection": "close"}, b""))
+            conn.shutdown(socket.SHUT_WR)
+
+        srv1 = MockServer(handler1)
+        srv1.start()
+        try:
+            stdout, _, rc = run_sikradio(
+                ["-u", srv1.url("/start"), "-q"], timeout=8)
+            self.assertExitOk(rc)
+            self.assertEqual(stdout, audio)
+        finally:
+            srv1.stop()
+            srv2.stop()
+
+    def test_relative_redirect_then_timeout_uses_original_url(self):
+        """After following a relative redirect and then timing out, the client
+        must reconnect to the ORIGINAL absolute URL — not the resolved
+        relative one."""
+        request_paths = []
+        conn_n = {"n": 0}
+
+        def handler(conn, addr, srv):
+            req = recv_until(conn)
+            conn_n["n"] += 1
+            first_line = req.split(b"\r\n")[0].decode()
+            path = first_line.split(" ")[1]
+            request_paths.append(path)
+
+            if path == "/origin":
+                conn.sendall(build_http_response(
+                    "HTTP/1.1 302 Found",
+                    {"Location": "/streampath", "Connection": "close"}, b""))
+                conn.shutdown(socket.SHUT_WR)
+            elif path == "/streampath":
+                conn.sendall(build_http_response(
+                    "HTTP/1.1 200 OK",
+                    {"content-type": "audio/mpeg"}, b"\xff" * 40))
+                if conn_n["n"] <= 2:
+                    time.sleep(3)  # silence → timeout
+                else:
+                    conn.shutdown(socket.SHUT_WR)
+
+        srv = MockServer(handler)
+        srv.start()
+        try:
+            stdout, _, rc = run_sikradio(
+                ["-u", srv.url("/origin"), "-q",
+                 "-t", str(SHORT_TIMEOUT_MS)], timeout=12)
+            self.assertExitOk(rc)
+            # /origin must be requested at least twice (initial + reconnect)
+            origins = [p for p in request_paths if p == "/origin"]
+            self.assertGreaterEqual(len(origins), 2,
+                                    f"After timeout the client did not return "
+                                    f"to the original URL: {request_paths}")
+        finally:
+            srv.stop()
+
+    def test_redirect_absolute_path_root(self):
+        """Location: / — redirect to the site root."""
+        audio = b"\x42" * 70
+        captured = {}
+
+        def handler(conn, addr, srv):
+            req = recv_until(conn)
+            if b"GET /deep/path" in req:
+                conn.sendall(build_http_response(
+                    "HTTP/1.1 302 Found",
+                    {"Location": "/", "Connection": "close"}, b""))
+            else:
+                captured["req2"] = req
+                conn.sendall(build_http_response(
+                    "HTTP/1.1 200 OK",
+                    {"content-type": "audio/mpeg"}, audio))
+            conn.shutdown(socket.SHUT_WR)
+
+        srv = MockServer(handler)
+        srv.start()
+        try:
+            stdout, _, rc = run_sikradio(
+                ["-u", srv.url("/deep/path"), "-q"], timeout=5)
+            self.assertExitOk(rc)
+            self.assertEqual(stdout, audio)
+            self.assertIn(b"GET / HTTP/1.1", captured["req2"])
+        finally:
+            srv.stop()
+
+    def test_redirect_relative_cookies_carried(self):
+        """A relative redirect must still carry forward cookies set on the
+        redirect response, exactly like an absolute redirect."""
+        captured = []
+
+        def handler(conn, addr, srv):
+            req = recv_until(conn)
+            captured.append(req)
+            if b"GET /entry" in req:
+                conn.sendall(build_http_response(
+                    "HTTP/1.1 302 Found",
+                    {"Location": "/audio",
+                     "Set-Cookie": "rel=works",
+                     "Connection": "close"}, b""))
+            else:
+                conn.sendall(build_http_response(
+                    "HTTP/1.1 200 OK",
+                    {"content-type": "audio/mpeg"}, b"\xff" * 50))
+            conn.shutdown(socket.SHUT_WR)
+
+        srv = MockServer(handler)
+        srv.start()
+        try:
+            _, _, rc = run_sikradio(["-u", srv.url("/entry"), "-q"], timeout=5)
+            self.assertExitOk(rc)
+            second = captured[1].decode("utf-8", errors="replace")
+            self.assertIn("Cookie:", second)
+            self.assertIn("rel=works", second)
+        finally:
+            srv.stop()
 
 
 # ===========================================================================

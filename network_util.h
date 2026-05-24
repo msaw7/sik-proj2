@@ -52,7 +52,7 @@ Includes a cookie header field with corresponding cookies, if 'cookies' map
 is not empty.
 Includes "Icy-MetaData: 1\r\n" header field if multiplex is set to true.
 */
-string build_request(const string& path, const string& host, const string& port,
+string build_request(const string& path, const string& host, 
     const map <string, string>& cookies, bool multiplex);
 
 /*
@@ -80,3 +80,6 @@ void update_cookies(multimap <string, string> &fields,
     map <string, string> &cookies);
 
 #endif
+
+string consider_relative_path(const string &new_url, string &protocol,
+    string &host, string &port, string &path);
